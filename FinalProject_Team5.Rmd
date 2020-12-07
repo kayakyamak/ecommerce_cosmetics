@@ -1,0 +1,490 @@
+---
+title: "E-Commerce Cosmetics Store: Marketing Analysis"
+author: "Team 5: Ayush Jithin, Kyle Morris, Aakash Vaghani, Kayako Yamakoshi"
+
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+# Data Preprocessing
+```{r}
+#install.packages("dplyr")                                         
+#install.packages("plyr")                                          
+#install.packages("readr")
+library("dplyr")                                        
+library("plyr")                                              
+library("readr")
+```
+
+## Data Setup
+1) If using all 4 months of data:
+```{r}
+# Merge Dataset
+# cosmetics.df <- list.files(path = "cosmetics_ecommerce", pattern = "*.csv", full.names = TRUE) %>% lapply(read.csv) %>% bind_rows
+# head(cosmetics.df)
+
+# Save the merge dataset to a csv file
+# write.csv(cosmetics.df, file = "merged_cosmetics.csv")
+
+# Load the dataset
+allcosmetics.df <- read_csv("merged_cosmetics.csv")
+```
+
+2)
++ Load November 2019 data for classification (Only using one month data for computing power limitation)
++ Load November & December 2019 data for clustering
+```{r}
+# Load the November 2019 data
+cosmetics.df <- read_csv("2019-Nov.csv")
+head(cosmetics.df)
+```
+
+
+
+## Data Overview
+```{r}
+# Check overview of the dataframe
+summary(cosmetics.df)
+```
+```{r}
+# Count unique values in each column
+sapply(cosmetics.df, function(x) length(unique(x)))
+# Check NAs in the dataframe
+sapply(cosmetics.df[, 2:9], function(x) mean(is.na(x)))
+```
++ category_code has a high percentage of NAs -> We will remove the category_code column
++ brand also had a a high percentage of NAs and could be a problem in the future
+
+## Data Cleaning
+
+```{r}
+#Remove cateogry_code from the dataframe
+cosmetics.df <- subset(cosmetics.df, select = -c(category_code))
+```
+
+### Column Type Transformation
+```{r}
+# Change even_time column to date&time data type
+#install.packages("lubridate")
+library(lubridate)
+cosmetics.df$event_time <- ymd_hms(cosmetics.df$event_time)
+str(cosmetics.df)
+```
+
+```{r}
+# Change categorical variables to factor type
+cols <- c("event_type", "product_id", "category_id", "brand", "user_id", "user_session")
+cosmetics.df[cols] <- lapply(cosmetics.df[cols], as.factor)
+sapply(cosmetics.df, class)
+```
+### Outlier Removal
+```{r}
+# Remove the observations with negative prices
+cosmetics.df <- cosmetics.df[which(cosmetics.df$price > 0),]
+```
+
+# EDA
+```{r}
+library(ggplot2)
+allcosmetics.df$event_time <- ymd_hms(allcosmetics.df$event_time)
+allcosmetics.df$month <- format(allcosmetics.df$event_time, "%m")
+allcosmetics.df <- allcosmetics.df[,c("event_type","month")]
+table <- as.data.frame(table(allcosmetics.df))
+table$month <- as.character(table$month)
+table$month <- factor(table$month, levels = c("10", "11", "12", "01", "02"))
+
+ggplot(data = table, mapping = aes(x = month, y = Freq/10000)) + geom_line(mapping = aes(color = event_type, group = event_type), lwd = 1.5) + ylab("Total Count (in thousands)") + ggtitle("User Activity by Month")
+```
+```{r}
+purchase.df <- cosmetics.df[which(cosmetics.df$event_type == "purchase"), ]
+# Add a column for day of the week
+purchase.df$dayOfWeek <- as.factor(weekdays(as.Date(purchase.df$event_time)))
+
+dow <- as.data.frame(table(purchase.df$dayOfWeek))
+names(dow) <- c("dayOfWeek", "count")
+row_name <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+dow$dayOfWeek <- factor(dow$dayOfWeek, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+ggplot(data = dow, mapping = aes(x = `dayOfWeek` , y = `count`/10000, group = 1)) + geom_line(color = "steelblue4", size = 1) + geom_point(size = 2) +  ylab("Total Count (in 10000)") +   scale_x_discrete(labels = c(row_name)) + ggtitle("Frequency of Purchase across the Week")
+```
+```{r}
+# Add a column for time of the day
+cosmetics.df$timeOfDay <- as.integer(format(cosmetics.df$event_time, "%H"))
+
+table2 <- as.data.frame(table(cosmetics.df[,c("event_type","timeOfDay")]))
+ggplot(data = table2, mapping = aes(x = timeOfDay, y = Freq/1000)) + geom_line(mapping = aes(color = event_type, group = event_type), lwd = 1.5) + ylab("Total Count(in thousands)") + ggtitle("User Activity by Hour")
+```
+```{r}
+# All available brands
+levels(cosmetics.df$brand)
+
+# Create data frame of number of events per brand
+brand_pop <- count(cosmetics.df, "brand")
+
+# Remove NA from brand list
+brand_pop <- brand_pop[-240,]
+
+# Select top 10 brands
+brand_pop <- brand_pop[order(-brand_pop$freq), ]
+brand_top10 <- brand_pop[1:10,]
+
+# Create graph of the top 10 brands.
+barplot(brand_top10$freq, names.arg = brand_top10$brand, main = "Top 10 Brands", col = grey.colors(10), las = 2, yaxt="n")
+title(ylab = "Events", line = 2.5)
+axis(2, cex.axis = 1)
+```
+
+# Modeling
+We will develop
++ clustering models for customer segmentation, and
++ classification models to identify what factors impact most to trigger purchase.
+
+## Customer Segmentation— Clustering
+
+We will use
++ k-means, and
++ hierarchical clustering
+to cluster customers, applying the RFM (recency, frequency, monetary value) methodology.
+
+### Feature Engineering
+
+We first extract the observations for purchase, then add a column to track the days till last purchase.
+```{r}
+# Extract the relevant data
+# purchase.df <- cosmetics.df[which(cosmetics.df$event_type == "purchase"), ]
+
+# Add a column to track how recently a customer makes a purchase/view products
+currentDate <- as.Date("2020-03-01")
+purchase.df$recency <- currentDate - as.Date(purchase.df$event_time)
+```
+
+Aggregate data by user to create new features.
+```{r}
+# Recency df
+purchase_recency <- aggregate(recency ~ user_id, data = purchase.df, min)
+# Frequency df
+purchase_frequency <- aggregate(event_type ~ user_id, data = purchase.df, length)
+# Monetary df
+purchase_monetary <- aggregate(price ~ user_id, data = purchase.df, sum)
+```
+
+Due to the nature of this dataset, every item that has been purchased in one setting is getting counted as a separate purchase. In our RFM model, frequency is the number of items purchased, rather than how often a customer comes back to the website to buy products.
+```{r}
+purchase.df[which(purchase.df$user_id == "53613286"), ]
+```
+
+Merge features into one dataframe.
+```{r}
+purchase_rfm <- merge(purchase_recency, purchase_frequency, by = "user_id", all = TRUE)
+purchase_rfm <- merge(purchase_rfm, purchase_monetary, by = "user_id", all = TRUE)
+purchase_rfm$recency <- as.integer(purchase_rfm$recency)
+names(purchase_rfm)[names(purchase_rfm) == "event_type"] <- "frequency"
+names(purchase_rfm)[names(purchase_rfm) == "price"] <- "monetary"
+summary(purchase_rfm)
+```
+### Data Overview
+```{r}
+boxplot(purchase_rfm$recency, main = "Purchase Recency Distribution", xlab = "Days", ylab = "Recency", horizontal = TRUE, col = "slategray3", border = "steelblue4")
+
+boxplot(purchase_rfm$frequency, main = "Purchase Frequency Distribution", xlab = "# of Items Purchased", ylab = "Frequency", horizontal = TRUE, col = "slategray3", border = "steelblue4")
+
+boxplot(purchase_rfm$monetary, main = "Distribution of Total Spending Per Customer", xlab = "USD", ylab = "Total Spending", horizontal = TRUE, col = "slategray3", border = "steelblue4")
+```
+
++ Recency is normal distributed.
++ Frequency and Monetary have huge outliers, which will likely to impact the clustering performance.
+
+### Data Standarization
+```{r}
+library(ggplot2)
+library(reshape2)
+scale_rfm <- scale(purchase_rfm[2:4])
+ggplot(melt(scale_rfm), aes(x=value)) +
+    geom_histogram(fill="gray", binwidth=0.2) +
+    facet_grid(Var2~., scales="free")
+summary(scale_rfm)
+```
+### Model Fitting
+
+Fit a kmeans clustering on the rfm dataset with k=4.
+```{r}
+set.seed(42)
+kmeans <- kmeans(purchase_rfm[2:4], centers = 4, nstart = 25)
+```
+
+```{r}
+#install.packages("ggpubr")
+#install.packages("factoextra")
+library(ggpubr)
+library(factoextra)
+fviz_cluster(kmeans, data = purchase_rfm[2:4],
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800", "darksalmon"), 
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+```
+As we expected, the outliers impacted the model performance significantly.
+
+#### Data Cleaning
+Remove outliers from the rfm dataset based on the box plots above.
+
+```{r}
+purchase_rfm <- purchase_rfm[which(purchase_rfm$monetary < 200), ]
+purchase_rfm <- purchase_rfm[which(purchase_rfm$frequency < 25), ]
+summary(purchase_rfm)
+```
+
+Data distribution after standarization.
+```{r}
+scale_rfm <- scale(purchase_rfm[2:4])
+ggplot(melt(scale_rfm), aes(x=value)) +
+    geom_histogram(fill="gray", binwidth=0.2) +
+    facet_grid(Var2~., scales="free")
+summary(scale_rfm)
+```
+#### Parameter Tuning
+
+Find the optimal k
+```{r}
+# Identify the optimal k
+numCluster <- c(1:10)
+sse <- c()
+for(n in numCluster){
+  sse <- c(sse, mean(kmeans(purchase_rfm[2:4], centers = n)$withinss))
+}
+
+# Plot the elbow graph
+plot(numCluster, sse, type = "l",
+     main = "Elbow Chart— SSE", xlab = "Number of k", ylab = "Average SSE", col = "deepskyblue4")
+```
+
+k = 3 seems optimal. 
+
+```{r}
+set.seed(42)
+kmeans_k4 <- kmeans(scale_rfm, centers = 4, nstart = 25)
+kmeans_k3 <- kmeans(scale_rfm, centers = 3, nstart = 25)
+```
+
+### Model Performance
+
+For k = 3
+```{r}
+#install.packages("ggpubr")
+#install.packages("factoextra")
+library(ggpubr)
+library(factoextra)
+fviz_cluster(kmeans_k3, data = scale_rfm,
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800", "darksalmon"), 
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+```
+For k = 4:
+```{r}
+fviz_cluster(kmeans_k4, data = scale_rfm,
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800", "darksalmon"), 
+             geom = "point",
+             ellipse.type = "convex", 
+             ggtheme = theme_bw()
+             )
+```
+
++ k=3 separated data points clearly.
++ For k=4, cluster 3 and 4 are overlapping with each other.
+
+### Profiling
+
+```{r}
+# Add segment to the original dataframe
+purchase_rfm$segment <- kmeans_k3$cluster
+```
+
+```{r}
+recency <- aggregate(recency~segment, purchase_rfm, median)
+recency
+```
+```{r}
+frequency <- aggregate(frequency~segment, purchase_rfm, median)
+frequency
+```
+
+````{r}
+price <- aggregate(monetary~segment, purchase_rfm, median)
+price
+`````
+
+Visualize customer segments on 2D.
+```{r}
+# Merge profile data into one dataframe
+seg_result <- merge(recency, frequency, by = "segment", all = TRUE)
+seg_result <- merge(seg_result, price, by = "segment", all = TRUE)
+seg_result$segment <- as.factor(seg_result$segment)
+
+# Plot the data as a scatterplot
+ggplot(seg_result,aes(x=recency,y=frequency, colour=segment, size = monetary))+geom_point()+scale_size_area()+scale_color_brewer(palette = "Set2")+ylab("Median Frequency")+xlab("Median Days Since Last Purchase")
+```
+```{r}
+#add brands per user to purchase_rfm data frame.Change brand column name to "loyal_brands".
+brandPerUser <- aggregate(brand~user_id, purchase.df, length)
+purchase_rfm <- merge(purchase_rfm, brandPerUser, by = "user_id")
+#purchase_rfm <- subset(purchase_rfm, select = -c(brand.x, brand.y))
+names(purchase_rfm)[names(purchase_rfm) == "brand"] <- "loyal_brands"
+```
+
+```{r}
+#visualize number of unique brands per segment.
+#plot(purchase_rfm$loyal_brands, purchase_rfm$monetary)
+plot(purchase_rfm$segment, purchase_rfm$loyal_brands)
+```
+
+```{r}
+#plot histograms for each segment showing number of brands purchased.
+hist(purchase_rfm[which(purchase_rfm$segment == 1), ]$loyal_brands, 
+     main = "Brand Loyalty: Cluster 1 - One and Done's", 
+     xlab = "Number of Brands Purchased", 
+     ylab = "Number of Customers",
+     col = "palegreen3") #new customers/once a month/one and done
+hist(purchase_rfm[which(purchase_rfm$segment == 2), ]$loyal_brands,
+     main = "Brand Loyalty: Cluster 2 - Necessity Shoppers", 
+     xlab = "Number of Brands Purchased", 
+     ylab = "Number of Customers",
+     col = "lightsalmon2") #low volume repeat customers/necessity shoppers
+hist(purchase_rfm[which(purchase_rfm$segment == 3), ]$loyal_brands,
+     main = "Brand Loyalty: Cluster 3 - Variety Shoppers", 
+     xlab = "Number of Brands Purchased", 
+     ylab = "Number of Customers",
+     col = "lightsteelblue3") #curious/reviewers/high volume/variety shoppers
+```
+
+Customers in segment 3 appear to be less loyal to specific brands and purchase a larger number of different brands. Segments 1 and 2 tend to be much more loyal to single brands. Segment 3 are variety shoppers. 1 and 2 might be focused on just buying a singular item.
+
+
+## Classification Modeling
+
+We first extract observations for remove_from_cart and purchase to focus on the final stage of customer journey.
+```{r}
+# Sort the dataframe so we can follow the customer journey
+# cosmetics.df <- cosmetics.df[with(cosmetics.df, order(user_id, product_id, event_time)), ]
+
+# Extract relevant data
+purchase_remove.df <- cosmetics.df[which(cosmetics.df$event_type == "purchase" | cosmetics.df$event_type =="remove_from_cart"), ] 
+
+# Reset the level for event_type
+purchase_remove.df$event_type <- droplevels(purchase_remove.df$event_type)
+levels(purchase_remove.df$event_type)
+
+summary(purchase_remove.df)
+```
+
+### Feature Engineering
+
+```{r}
+# Add a column to track how many days left to Christmas
+purchase_remove.df$until_christmas <- as.Date("2019-12-25") - as.Date(purchase_remove.df$event_time)
+
+# Add a column for day of the week
+purchase_remove.df$dayOfWeek <- as.factor(weekdays(as.Date(purchase_remove.df$event_time)))
+
+# Add a column for time of the day
+purchase_remove.df$timeOfDay <- as.integer(format(purchase_remove.df$event_time, "%H"))
+```
+
+### Naive Bayes
+
+Remove the unnecessary columns.
+
+```{r}
+purchase_remove.df <- as.data.frame(subset(purchase_remove.df, select = -c(event_time, user_session, user_id)))
+```
+
+Split data into training/testing datasets.
+
+```{r}
+#install.packages('caTools')
+library(caTools)
+set.seed(42)
+
+# Split data to train/test datasets
+sample <- sample.split(purchase_remove.df, SplitRatio = 0.7)
+train <- subset(purchase_remove.df, sample == TRUE)
+test <- subset(purchase_remove.df, sample == FALSE)
+```
+
+Fit a naive bayes model on the training dataset and predict event_type on the testing dataset.
+
+
+```{r}
+# Load naive Bayes library
+library(e1071)
+nb <- naiveBayes(event_type ~ price+until_christmas+timeOfDay+dayOfWeek, data = train)
+
+# Run the Naive Bayes model on the testing data
+pred <- predict(nb, test)
+
+prop.table(table(pred))
+mean(test$event_type==pred)
+```
+```{r}
+# Confusion Matrix
+prop.table(table(pred, test$event_type))
+```
+
+### Random Forest
+
+Fit a random forest model on the training dataset.
+
++ For mtry = 3:
+```{r}
+#install.packages("randomForest")
+library(randomForest)
+set.seed(92929)
+randomforest <- randomForest(event_type ~ price+until_christmas+timeOfDay+dayOfWeek, data = train, mtry = 3, importance = TRUE)
+```
+
++ Parameter Tuning:
+```{r}
+# Running RFMs for varying mtry values
+# mtry = c(1:9)
+# accuracy = c()
+#  
+# for(num in mtry){
+#   set.seed(101)
+#   rfm.tmp <- randomForest(event_type ~ price+until_christmas+timeOfDay+dayOfWeek, data = train, mtry = num)
+#   pred <- predict(rfm.tmp, test)
+#   accuracy <- c(accuracy, accuracy(pred, test$event_type))
+#  }
+#  
+# plot(mtry, accuracy, type = "l",
+#     main = "Accuracy Rate", xlab = "Number of Variable Sampled at Each Split (mtry)", ylab = "Accuracy Rate", col = "deepskyblue4")
+```
+
+#### Model Performance
+
++ For mtry = 3:
+```{r}
+# Run the random forest on the testing dataset
+pred <- predict(randomforest, test)
+
+# Calculate the accuracy rate
+library(Metrics)
+print(accuracy(pred, test$event_type))
+
+# Confusion Matrix
+prop.table(table(pred, test$event_type))
+```
+
+#### Variable Importance
+
+```{r}
+varImpPlot(randomforest)
+
+library(gplots)
+library(RColorBrewer)
+
+heatmap.2(t(importance(randomforest)), col=brewer.pal(9,"Blues"),dend="none", trace="none", key=FALSE, margins=c(10,10), main="Variable importance by segement")
+```
