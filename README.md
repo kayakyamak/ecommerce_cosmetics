@@ -1,6 +1,6 @@
 # E-Commerce Cosmetics Store— Marketing Analysis
 
-This project uses the e-commerce sales data from https://www.kaggle.com/mkechinov/ecommerce-events-history-in-cosmetics-shop?select=2019-Dec.csv and develops makreting strategies for the e-commerce website.
+This project uses the e-commerce sales data and develops makreting strategies for the e-commerce website.
 
 The project has two parts:
 
